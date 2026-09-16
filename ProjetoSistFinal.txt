@@ -1,0 +1,386 @@
+#include <xc.h>
+#include "nxlcd.h"
+#include "nxlcd.c"
+
+#pragma config FOSC = HS
+#pragma config CPUDIV = OSC1_PLL2
+#pragma config PWRT = ON
+#pragma config WDT = OFF
+#pragma config BOR = OFF
+#pragma config LVP = OFF
+#pragma config PBADEN = OFF
+
+unsigned char S=0,I=0,V=0,BUFFER=0;
+unsigned int T,T1,A=300,B=300,M=300,i;
+
+void MostraLCD(int a,char c);
+void TecMatric();
+void LerTemp();
+void LerPot();
+void ControlTemp();
+
+void main (void){
+    RCONbits.IPEN=1; //Habilita Prioridades
+    INTCONbits.GIE=1; //Habilita Interrupções Globais
+    INTCONbits.GIEL=1; //Interrupções de baixa prioridade
+    INTCONbits.GIEH=1; //Interrupções de alta prioridade
+    T1CONbits.T1OSCEN=0; //Desabilita oscilador TMR1 para a saída RC1
+    
+    //Config. USART
+    TXSTAbits.BRGH=1; //BRG em alta vel.
+    TXSTAbits.SYNC=0; //Habilita comunicação assíncrona
+    TXSTAbits.TXEN=1; //Habilita TX
+    RCSTAbits.SPEN=1; //Pinos I/O para digital
+    RCSTAbits.CREN=1; //Habilita RX
+    BAUDCONbits.BRG16=0; //BRG em 8 bits
+    SPBRG=129; //baud-rate de 9600
+    TRISCbits.TRISC6=1;
+    TRISCbits.TRISC7=1;
+    PIR1bits.RCIF=0;
+    IPR1bits.RCIP=1;
+    PIE1bits.RCIE=1;   
+    
+    //Timer0
+    INTCON2bits.TMR0IP=1;
+    T0CON=0b10000111; //Tmax=3,3554s
+    TMR0H=0xB3;
+    TMR0L=0xB4; //TMR0=46004 => T=1s
+    INTCONbits.TMR0IE=1;
+    INTCONbits.TMR0IF=0;
+   
+    //Config INT0
+    INTCON2bits.INTEDG0=0; //Borda de descida
+    INTCONbits.INT0IE=1; //Habilita INT0
+    INTCONbits.INT0IF=0; //Zera a flag de INT0
+   
+    //Config INT1
+    INTCON2bits.INTEDG1=0; //Borda de descida
+    INTCON3bits.INT1IP=0; //Prioridade baixa
+    INTCON3bits.INT1IE=1; //Habilita INT1
+    INTCON3bits.INT1IF=0; //Zera a flag de INT1
+
+    //Config INT2
+    INTCON2bits.INTEDG2=0; //Borda de descida
+    INTCON3bits.INT2IP=0; //Prioridade baixa
+    INTCON3bits.INT2IE=1; //Habilita INT2
+    INTCON3bits.INT2IF=0; //Zera a flag de INT2
+   
+    //Config. ADC
+    ADCON1=0b00001011; //Seleciona Vss (Vref-) e Vdd (Vref+), AN0 a AN3 como analógico
+    ADCON2=0b10111101; //Justifica a direita, 20Tad, Fosc/16
+   
+    //Config. dos pinos
+    TRISAbits.TRISA0=1;
+    TRISAbits.TRISA3=1;
+    TRISB=0xFF;
+    TRISD=0;
+    PORTD=0;
+    TRISC=0;
+    TRISE=0;
+   
+    //Timer2
+    T2CON = 0b00000110; //bit 2 = enable, T2CON<1:0> Pre-scaler 16:, Tmax = 0,2096s
+    PR2=156; //PR2=(500us/(4*50ns*16))-1=155,25
+   
+    //Config. PWM em CCP1
+    //A=cont1*63; //t=10%*500us=10us, DC=50us/(50ns*16)=62.5?63
+    CCP1CON=0b00001111; //bits 1 e 0 não usados, CCP1CON<3:2>=PWM mode
+    CCP1CONbits.DC1B=(1000-A)*63%400; //2 bits menos significativos de DC1
+    CCPR1L=(1000-A)*63/400; //8 bits mais significativos de DC1
+
+    //Config. PWM em CCP2
+    //B=cont2*63; //t=10%*500us=10us, DC=50us/(50ns*16)=62.5?63
+    CCP2CON=0b00001111; //bits 1 e 0 não usados, CCP2CON<3:2>=PWM mode
+    CCP2CONbits.DC2B=B*63%400; //2 bits menos significativos de DC2
+    CCPR2L=B*63/400; //8 bits mais significativos de DC2
+   
+    //LCD
+    lcd_init();
+    for(;;){  
+    }
+}
+
+void LerTemp(){
+    ADCON0=0b00000011; //AN0, pino RA0
+    while(ADCON0bits.GO_DONE); //Espera a conversão
+}
+
+void LerPot(){
+    ADCON0=0b00001111; //AN3, pino RA3
+    while(ADCON0bits.GO_DONE); //Espera a conversão
+}
+
+void ControlTemp(){
+    if(S!=1){
+        //Controle do cooler
+        if(M>T&&A>0&&(T-T1)<5){ //Temp abaixo, abaixa o cooler
+            if((M-T)>10&&A>50){
+                A=A-10;
+            }
+            if((M-T)>3){
+                A--;
+            }
+            if(T1>M){
+                A=20;
+            }
+        }
+        else if((T-T1)>5){
+            A++;
+        }
+        if(M<T&&A<1000&&(T1-T)<5){ //Temp acima, aumenta o cooler
+            if((M-T)<-10&&A<940){
+                A=A+10;
+            }
+            if((M-T)<-3){
+                A++;
+            }
+            if(A<100){ //Quando o cooler é desligado (DC<10%) ele apenas gira quando DC se encontra próximo de 30%
+                A=300;
+            }
+            if(T1<M){
+                A=980;
+            }
+        }
+        else if((T1-T)>5){
+            A--;
+        }
+        if(A>1000){
+            A=1000;
+        }
+        if(A<0){
+            A=0;
+        }
+    }
+    if((T>=(T-10)&&T<=(T+10))&&(M>=(T-10)&&M<=(T+10))){
+        PORTE=0b00000010;
+    }
+    else{
+        PORTE=0b00000001;
+    }
+    if(S==2){
+        //Controle do heater
+        if(M>T&&B<1000&&(T-T1)<5){ //Temp abaixo, abaixa o heater
+            if((M-T)>10&&B<940){
+                B=B+10;
+            }
+            if((M-T)>3){
+                B++;
+            }
+            if(T1<M){
+                B=0;
+            }
+        }
+        if((T-T1)>5){
+            B--;
+        }
+        if(M<T&&B>0&&(T1-T)<5){ //Temp acima, aumenta o heater
+            if((M-T)<-10&&B>60){
+                B=B-10;
+            }
+            if((M-T)<-3){
+                B--;
+            }
+            if(T1>M){
+                B=1000;
+            }
+        }
+        if((T1-T)>5){
+            B++;
+        }
+        if(B>1000){
+            B=1000;
+        }
+        if(B<0){
+            B=0;
+        }
+    }
+    T1=T;
+}
+
+void MostraLCD(int a,char c){
+    if((a/1000)%10!=0){
+        lcd_dat(0x30+(a/1000)%10);
+    }
+    lcd_dat(0x30+(a/100)%10);
+    lcd_dat(0x30+(a/10)%10);
+    lcd_dat(',');
+    lcd_dat(0x30+(a%10));
+    if(c==0){
+        lcd_str("%");
+        if((a/1000)%10==0){
+            lcd_dat(' ');
+        }
+    }
+    else{
+        lcd_dat('C');
+    }
+}
+
+void interrupt MinhaInt(void){
+    if(INTCONbits.TMR0IF==1){
+        INTCONbits.TMR0IF=0;
+        TMR0H=0xB3;
+        TMR0L=0xB4; //TMR0=46004 => T=1s
+        LerPot();
+        if(S==0){
+            B=(((ADRESH*256)+ADRESL)*0.97751); //Armazena a conversão em valor de 0 a 1000
+        }
+        else if(S==1){
+            if(V==0){
+                A=(((ADRESH*256)+ADRESL)*0.97751); //Armazena a conversão em valor de 0 a 1000
+            }
+            else if(V==1){
+                B=(((ADRESH*256)+ADRESL)*0.97751); //Armazena a conversão em valor de 0 a 1000
+            }
+        }
+        else if(S==2){
+            M=(((ADRESH*256)+ADRESL)*0.58651)+150; //Armazena a conversão em valor de 150 a 750
+        }
+        LerTemp();
+        T=(((ADRESH*256)+ADRESL)*4.88759); //Armazena a conversão em valor em graus celcius
+       
+        lcd_cmd(L_CLR);
+        CCP1CONbits.DC1B=(1000-A)/100*63%4; //2 bits menos significativos de DC1
+        CCPR1L=(1000-A)*63/400; //8 bits mais significativos de DC1
+        CCP2CONbits.DC2B=(B)/100*63%4; //2 bits menos significativos de DC2
+        CCPR2L=(B)*63/400; //8 bits mais significativos de DC2
+        lcd_cmd(L_L1);
+        if(S==0){
+            lcd_str("Modo 1  ");
+        }
+        else if(S==1){
+            if(V==0){
+                lcd_str("Modo 2C ");
+            }
+            else if(V==1){
+                lcd_str("Modo 2H ");
+            }
+        }
+        else if(S==2){
+            if(I==0){
+                lcd_str("Modo 3  ");
+            }
+            else if(I==1){
+                lcd_str("Modo 3U ");
+            }
+        }
+        else{
+            lcd_str("Erro");
+        }
+        if(S==1){
+            lcd_str("T:");
+            MostraLCD(T,1);
+        }
+        else{
+            if(V==0){
+                lcd_str("T:");
+                MostraLCD(T,1);
+            }
+            else{
+                lcd_str("M:");
+                MostraLCD(M,1);
+            }
+            
+        }
+        lcd_cmd(L_L2);
+        lcd_str("C:"); //Cooler
+        MostraLCD(A,0);
+        lcd_str("H:"); //Heater
+        MostraLCD(B,0);
+        
+        if(S!=1){
+            ControlTemp();
+        }
+    }
+    if(INTCONbits.INT0IF==1){
+        INTCONbits.INT0IF=0;
+        S++;
+        if(S>=3){
+            S=0;
+        }
+        V=0;
+        I=0;
+        atraso_ms(150);
+    }
+    if(PIR1bits.RCIF==1){
+        PIR1bits.RCIF=0;
+        if(S==0||(S==2&&I==1)){
+            V=1;
+            switch(RCREG){
+                case '1':
+                    BUFFER=1;
+                    break;
+                case '2':
+                    BUFFER=2;
+                    break;
+                case '3':
+                    BUFFER=3;
+                    break;
+                case '4':
+                    BUFFER=4;
+                    break;
+                case '5':
+                    BUFFER=5;
+                    break;
+                case '6':
+                    BUFFER=6;
+                    break;
+                case '7':
+                    BUFFER=7;
+                    break;
+                case '8':
+                    BUFFER=8;
+                    break;
+                case '9':
+                    BUFFER=7;
+                    break;
+                case '0':
+                    BUFFER=0;
+                    break;
+                default:
+                    BUFFER=10;
+            }
+            if(BUFFER!=10){
+                M=(M*10+BUFFER)%1000;
+            }
+            TXREG=(0x0D);
+            while(TXSTAbits.TRMT==0){}
+            TXREG=(0x0A);
+            while(TXSTAbits.TRMT==0){}
+            TXREG=(0x30+(M/100)%10);
+            while(TXSTAbits.TRMT==0){}
+            TXREG=(0x30+(M/10)%10);
+            while(TXSTAbits.TRMT==0){}
+            TXREG=(',');
+            while(TXSTAbits.TRMT==0){}
+            TXREG=(0x30+(M%10));
+            while(TXSTAbits.TRMT==0){}
+            TXREG=('C');
+            atraso_ms(100);
+        }
+    }
+}
+
+void interrupt low_priority MinhaIntBaixa(void){ //Seleção da variável no modo 2
+    if(INTCON3bits.INT1IF==1){
+        INTCON3bits.INT1IF=0;
+        if(V==0){
+            V=1; //muda pro cooler ou temperatura desejada ou entrada no modo 3
+        }
+        else if(V==1){
+            V=0; //muda pro heater ou temperatura atual ou entrada no modo 3
+        }
+        atraso_ms(150);
+    }
+    else if(INTCON3bits.INT2IF==1){ //Ativa teclado matricial
+        INTCON3bits.INT2IF=0;
+        if(S==2){
+            if(I==1){
+                I=0;
+            }
+            else{
+                I=1;
+            }
+        }
+    }
+}
